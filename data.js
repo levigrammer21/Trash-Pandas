@@ -8,6 +8,7 @@ let serial = 0;
 const str = v => v == null ? '' : String(v).trim();
 const yes = v => v === true || /^(true|yes|1)$/i.test(str(v));
 function cleanDate(value) {
+ if (typeof value === 'number' && value > 1 && Number.isFinite(value)) return new Date(Date.UTC(1899,11,30)+Math.floor(value)*86400000).toISOString().slice(0,10);
  const s = str(value); let m;
  if ((m = s.match(/^Date\((\d+),(\d+),(\d+)(?:,.*)?\)$/))) return validDate(`${m[1]}-${String(+m[2]+1).padStart(2,'0')}-${m[3].padStart(2,'0')}`);
  if ((m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))) return validDate(`${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`);
@@ -18,13 +19,15 @@ function validDate(s) {
  const d = new Date(s+'T12:00:00Z');
  return !isNaN(d) && d.toISOString().slice(0,10) === s ? s : '';
 }
-function cleanTime(v) {
- const s = str(v); let m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)?$/i);
- if (!m) return '';
- let h = +m[1], min = +m[2];
- if (m[3]) {if(h<1||h>12) return '';h=h%12+(/pm/i.test(m[3])?12:0);}
- if(h>23 || min>59) return '';
- return `${String(h).padStart(2,'0')}:${m[2]}`;
+function cleanTime(v, period = '') {
+ if(Array.isArray(v)) {const h=Number(v[0]),m=Number(v[1]);return h>=0&&h<24&&m>=0&&m<60?`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`:'';}
+ if(typeof v==='number'&&v>=0&&v<1){const minutes=Math.round(v*1440)%1440;return `${String(Math.floor(minutes/60)).padStart(2,'0')}:${String(minutes%60).padStart(2,'0')}`;}
+ const s=str(v).replace(/\./g,'');let match=s.match(/^(\d{1,2})(?::(\d{2}))?(?::\d{2})?\s*(AM|PM)?$/i);
+ if(!match)return '';
+ let h=+match[1],min=+(match[2]||0);const suffix=match[3]||((h>=1&&h<=12)?str(period):'');
+ if(suffix){if(h<1||h>12||! /^(AM|PM)$/i.test(suffix))return '';h=h%12+(/^PM$/i.test(suffix)?12:0);}
+ if(h>23||min>59)return '';
+ return `${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}`;
 }
 function today(now = new Date()) {
  const parts = new Intl.DateTimeFormat('en-US',{timeZone:C.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(now);
@@ -46,11 +49,11 @@ function zonedDate(date, time = '00:00') {
 function endOfEvent(e) {
  if (!e._date) return 0;
  if(!e._time)return +zonedDate(addDays(e._date,1),'00:00');
- let end=cleanTime(e['End time']);
+ let end=cleanTime(e['End time'], e['AM / PM']);
  if(!end)return +zonedDate(e._date,e._time)+7200000;
  return +zonedDate(end<=e._time?addDays(e._date,1):e._date,end);
 }
-function upcoming(e, now=Date.now()) {return e.Status !== 'Final' && (e.Status==='Live' || endOfEvent(e)>=now);}
+function upcoming(e, now=Date.now()) {return e.Status !== 'Final' && (e.Status==='Live' || (e._date && e._date>=today(new Date(now))) || endOfEvent(e)>now);}
 function scores(e) {
  const a = str(e['Our score']), b = str(e['Their score']);
  return e.Type==='Game' && e.Status==='Final' && /^\d+$/.test(a) && /^\d+$/.test(b) ? [+a,+b] : null;
@@ -75,7 +78,7 @@ function loadTab(name) {
   };
   script.onerror=()=>finish(new Error('Unable to reach Google Sheets'));
   const url=new URL(`https://docs.google.com/spreadsheets/d/${C.sheetId}/gviz/tq`);
-  url.searchParams.set('sheet',name);url.searchParams.set('headers','1');url.searchParams.set('range','A1:O5000');
+  url.searchParams.set('sheet',name);url.searchParams.set('headers','1');url.searchParams.set('range','A1:Z5000');
   url.searchParams.set('tqx',`out:json;responseHandler:${callback}`);url.searchParams.set('_',String(Math.floor(Date.now()/C.refreshMs)));
   script.src=url.href;script.referrerPolicy='no-referrer';document.head.append(script);
  });
@@ -92,7 +95,7 @@ function model(raw) {
  const teams=(raw.Teams||[]).filter(r=>yes(r.Publish)&&str(r.Team)).sort(order);
  const names=new Set(teams.map(r=>str(r.Team)));
  const publicRows=name=>(raw[name]||[]).filter(r=>yes(r.Publish)&&(!str(r.Team)||names.has(str(r.Team))));
- const schedule=publicRows('Schedule').map((r,i)=>({...r,Type:str(r.Type)||'Game',Status:str(r.Status)||'Scheduled',_date:cleanDate(r.Date),_time:cleanTime(r.Time),_id:i})).filter(r=>r._date&&str(r['Opponent / Title'])).sort((a,b)=>(a._date+(a._time||'23:59')).localeCompare(b._date+(b._time||'23:59')));
+ const schedule=publicRows('Schedule').map((r,i)=>({...r,Type:str(r.Type)||'Game',Status:str(r.Status)||'Scheduled',_date:cleanDate(r.Date),_time:cleanTime(r.Time,r['AM / PM']),_id:i})).filter(r=>r._date&&str(r['Opponent / Title'])).sort((a,b)=>(a._date+(a._time||'23:59')).localeCompare(b._date+(b._time||'23:59')));
  return {settings,teams,schedule,roster:publicRows('Roster').filter(r=>str(r.Name)).sort((a,b)=>(a.Role==='Coach')-(b.Role==='Coach')||order(a,b)||str(a.Number).localeCompare(str(b.Number),undefined,{numeric:true})),announcements:publicRows('Announcements').filter(r=>str(r.Title)),links:publicRows('Links').filter(r=>str(r.Label)).sort(order),sponsors:publicRows('Sponsors').filter(r=>str(r.Name)).sort(order),gallery:publicRows('Gallery').sort(order)};
 }
 function activeAnnouncement(a,day=today()) {const start=cleanDate(a['Start date']),end=cleanDate(a['End date']);return (!start||start<=day)&&(!end||end>=day);}
